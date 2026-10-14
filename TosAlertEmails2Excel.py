@@ -11,7 +11,8 @@ stop the export rather than silently omitting or guessing a quantity.
 Classic Outlook searches all mail folders in the selected mailbox, including
 top-level folders outside the Inbox. Folder access errors stop the export.
 After the Excel file is saved, the exported BOT emails are marked as read
-(classic Outlook only; skip with --no-mark-read).
+(classic Outlook only; skip with --no-mark-read). If the output workbook is
+already open in Excel, it is closed first (other workbooks are left alone).
 
 Sources:
   graph   - Hotmail/Outlook.com directly via Microsoft Graph (works with "New Outlook"
@@ -36,7 +37,9 @@ Usage (set OUTLOOK_ACCOUNT=you@hotmail.com in .env to pick the mailbox):
 import argparse
 import os
 import re
+import time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import unquote
 
 import pandas as pd
 import requests
@@ -236,6 +239,52 @@ def mark_emails_read(rows):
     return marked
 
 
+def is_same_workbook(full_name, path):
+    if os.path.normcase(full_name) == os.path.normcase(path):
+        return True
+    # Excel reports OneDrive-synced files as https://d.docs.live.net/<id>/<path under OneDrive>
+    if not full_name.lower().startswith("http"):
+        return False
+    url_path = unquote(full_name).replace("\\", "/").lower()
+    for var in ("OneDriveConsumer", "OneDriveCommercial", "OneDrive"):
+        root = os.environ.get(var, "")
+        if not root:
+            continue
+        try:
+            relative = os.path.relpath(path, root)
+        except ValueError:
+            continue
+        if not relative.startswith("..") and url_path.endswith("/" + relative.replace("\\", "/").lower()):
+            return True
+    return False
+
+
+def close_workbook_if_open(path):
+    import pywintypes
+    import win32com.client
+
+    try:
+        excel = win32com.client.GetActiveObject("Excel.Application")
+    except pywintypes.com_error:
+        return False
+    for workbook in list(excel.Workbooks):
+        if is_same_workbook(workbook.FullName, path):
+            workbook.Close(SaveChanges=False)
+            return True
+    return False
+
+
+def wait_until_writable(path, attempts=10):
+    for attempt in range(attempts):
+        try:
+            with open(path, "ab"):
+                return True
+        except PermissionError:
+            if attempt < attempts - 1:
+                time.sleep(0.5)
+    return False
+
+
 def email_key(received, subject):
     return pd.Timestamp(received).floor("s"), subject
 
@@ -277,10 +326,9 @@ def main():
 
     out_path = os.path.abspath(args.out or os.path.join(SCRIPT_DIR, "data", "TdyBuyAlertsTrades.xlsx"))
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    try:
-        with open(out_path, "ab"):
-            pass
-    except PermissionError:
+    if close_workbook_if_open(out_path):
+        print(f"Closed {os.path.basename(out_path)} in Excel (unsaved edits discarded; file is regenerated).")
+    if not wait_until_writable(out_path):
         raise SystemExit(f"Cannot write {out_path}. Close it in Excel and run again.")
     previous_keys = load_previous_keys(out_path)
 
