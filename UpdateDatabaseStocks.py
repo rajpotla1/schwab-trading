@@ -97,12 +97,24 @@ def build_ticker_rows(ws):
     return {key: row for key, (row, _) in best.items()}
 
 
+def put(obj, name, value):
+    # Raw PROPERTYPUT: win32com's setattr hides Excel's real error (e.g. "busy") behind AttributeError.
+    import pythoncom
+
+    dispid = obj._oleobj_.GetIDsOfNames(name)
+    obj._oleobj_.Invoke(dispid, 0, pythoncom.DISPATCH_PROPERTYPUT, 0, value)
+
+
 def set_value(ws, address, value):
-    com(lambda: setattr(ws.Range(address), "Value", value))
+    com(lambda: put(ws.Range(address), "Value", value))
 
 
 def set_formula(ws, address, formula):
-    com(lambda: setattr(ws.Range(address), "Formula", formula))
+    com(lambda: put(ws.Range(address), "Formula", formula))
+
+
+def set_fill(ws, address, name, value):
+    com(lambda: put(ws.Range(address).Interior, name, value))
 
 
 def get_formula(ws, address):
@@ -112,7 +124,7 @@ def get_formula(ws, address):
 def update_existing(ws, row, trade_date, qty, price):
     term = f"{fmt_num(qty)}*{fmt_num(price)}"
     set_value(ws, f"B{row}", trade_date)
-    com(lambda: setattr(ws.Range(f"A{row}:BF{row}").Interior, "ColorIndex", XL_COLOR_INDEX_NONE))
+    set_fill(ws, f"A{row}:BF{row}", "ColorIndex", XL_COLOR_INDEX_NONE)
     set_formula(ws, f"T{row}", append_term(get_formula(ws, f"T{row}"), term))
     set_formula(ws, f"V{row}", append_term(get_formula(ws, f"V{row}"), fmt_num(qty)))
 
@@ -120,13 +132,19 @@ def update_existing(ws, row, trade_date, qty, price):
 def insert_new(ws, ticker, trade_date, qty, price):
     new_row = TEMPLATE_ROW + 1
     com(lambda: ws.Rows(new_row).Insert(Shift=XL_SHIFT_DOWN))
-    com(lambda: ws.Rows(TEMPLATE_ROW).Copy(ws.Rows(new_row)))
-    for col in "BCD":
-        set_value(ws, f"{col}{new_row}", trade_date)
-    set_formula(ws, f"V{new_row}", f"={fmt_num(qty)}")
-    set_formula(ws, f"T{new_row}", f"={fmt_num(qty)}*{fmt_num(price)}")
-    com(lambda: ws.Range(f"AM{new_row}").ClearContents())
-    set_value(ws, f"AM{new_row}", ticker)
+    try:
+        com(lambda: ws.Rows(TEMPLATE_ROW).Copy(ws.Rows(new_row)))
+        for col in "BCD":
+            set_value(ws, f"{col}{new_row}", trade_date)
+        set_formula(ws, f"V{new_row}", f"={fmt_num(qty)}")
+        set_formula(ws, f"T{new_row}", f"={fmt_num(qty)}*{fmt_num(price)}")
+        com(lambda: ws.Range(f"AM{new_row}").ClearContents())
+        set_value(ws, f"AM{new_row}", ticker)
+    except Exception:
+        # Never leave a half-built copy of the template row behind.
+        com(lambda: ws.Rows(new_row).Delete())
+        print(f"  Insert of {ticker} failed; removed the partially inserted row {new_row}.")
+        raise
     try:
         com(lambda: ws.Range(f"AM{new_row}").ConvertToLinkedDataType(
             ServiceID=STOCKS_SERVICE_ID, LanguageCulture="en-US"))
@@ -136,7 +154,7 @@ def insert_new(ws, ticker, trade_date, qty, price):
 
 
 def highlight_row(ws, row):
-    com(lambda: setattr(ws.Range(f"A{row}:BF{row}").Interior, "Color", RED))
+    set_fill(ws, f"A{row}:BF{row}", "Color", RED)
 
 
 def apply_trades(ws, trades, dry_run=False, applied=None):
