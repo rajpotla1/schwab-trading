@@ -3,6 +3,7 @@ import importlib
 from dotenv import load_dotenv
 import pandas as pd
 import schwabdev
+from schwab_tokens import TOKENS_DB
 
 
 
@@ -18,7 +19,7 @@ if not all([client_id, client_secret, callback_url]):
     raise ValueError("Error: One or more sensitive keys failed to load from the .env file.")
 
 # 3. Initialize the Schwab client
-client = schwabdev.Client(client_id, client_secret, callback_url,update_tokens=True )
+client = schwabdev.Client(client_id, client_secret, callback_url, tokens_db=TOKENS_DB,update_tokens=True )
 
 # 4. Retrieve linked accounts and extract the account hash
 linked_accounts = client.linked_accounts().json()

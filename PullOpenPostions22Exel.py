@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 from dotenv import load_dotenv
 import schwabdev
+from schwab_tokens import TOKENS_DB
 import openpyxl
 from openpyxl.utils.dataframe import dataframe_to_rows
 
@@ -18,7 +19,7 @@ if not all([client_id, client_secret, callback_url]):
 
 # 2. Initialize Schwab connection
 try:
-    client = schwabdev.Client(client_id, client_secret, callback_url)
+    client = schwabdev.Client(client_id, client_secret, callback_url, tokens_db=TOKENS_DB)
 except Exception as e:
     raise SystemExit(f"💥 Connection Failure: Schwab Client rejected authentication: {e}")
 

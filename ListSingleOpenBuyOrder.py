@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 import schwabdev
+from schwab_tokens import TOKENS_DB
 from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
 
@@ -15,7 +16,7 @@ if not all([client_id, client_secret, callback_url]):
 
 # 2. Initialize the Schwab client
 try:
-    client = schwabdev.Client(client_id, client_secret, callback_url)
+    client = schwabdev.Client(client_id, client_secret, callback_url, tokens_db=TOKENS_DB)
 except Exception as e:
     raise SystemExit(f"💥 Critical Error: Failed to initialize Schwab Client. Details: {e}")
 

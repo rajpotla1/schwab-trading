@@ -16,3 +16,6 @@ __pycache__/
 
 # Editor
 .vscode/
+
+# Schwab API tokens (synced between computers by OneDrive, never committed)
+Config/tokens.db*

@@ -1,6 +1,7 @@
 
 import os
 import schwabdev
+from schwab_tokens import TOKENS_DB
 from dotenv import load_dotenv
 
 # 1. Load the hidden variables from the .env file into the system memory
@@ -13,13 +14,13 @@ callback_url = os.getenv("SCHWAB_CALLBACK_URL")
 account_id = os.getenv("SCHWAB_ACCOUNT_ID")
 # 2. Initialize the client (This triggers the initial login flow)
 
-client = schwabdev.Client(client_id, client_secret, callback_url)
+client = schwabdev.Client(client_id, client_secret, callback_url, tokens_db=TOKENS_DB)
 
 client = schwabdev.Client(
     client_id,
     client_secret,
     callback_url,
-    tokens_db="~/.schwabdev/tokens.db",
+    tokens_db=TOKENS_DB,
     encryption=None,
     timeout=10,
     call_on_auth=None,
