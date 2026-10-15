@@ -51,6 +51,7 @@ SENDER = "alerts@thinkorswim.com"
 GRAPH_SCOPES = ["Mail.Read"]
 TOKEN_CACHE = os.path.join(SCRIPT_DIR, "Config", "outlook_token.json")
 OL_MAIL_ITEM_CLASS = 43
+TRADES_DATE_FORMAT = "m/d/yyyy"  # Excel's built-in short date, so Format Cells shows the Date category
 
 
 def extract_bot_text(subject: str) -> str | None:
@@ -350,7 +351,7 @@ def main():
         for col, width in zip("ABCDE", (20, 15, 10, 12, 8)):
             trades_ws.column_dimensions[col].width = width
         for cell in trades_ws["A"][1:]:
-            cell.number_format = "yyyy-mm-dd hh:mm:ss"
+            cell.number_format = TRADES_DATE_FORMAT
         new_fill = PatternFill(fill_type="solid", start_color="FFFF99", end_color="FFFF99")
         for row_cells, new in zip(trades_ws.iter_rows(min_row=2), is_new):
             if new:

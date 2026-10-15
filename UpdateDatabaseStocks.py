@@ -38,6 +38,7 @@ TICKER_IN_A = re.compile(r"^([A-Z][A-Z0-9./ ]*?) - ")
 XL_SHIFT_DOWN = -4121
 XL_COLOR_INDEX_NONE = -4142
 RED = 255  # Excel colors are BGR: RGB(255, 0, 0)
+DATE_FORMAT = "m/d/yyyy"  # Excel's built-in short date, so Format Cells shows the Date category
 STOCKS_SERVICE_ID = 268435456
 RPC_E_CALL_REJECTED = -2147418111
 RPC_E_SERVERCALL_RETRYLATER = -2147417846
@@ -109,6 +110,11 @@ def set_value(ws, address, value):
     com(lambda: put(ws.Range(address), "Value", value))
 
 
+def set_date(ws, address, value):
+    com(lambda: put(ws.Range(address), "NumberFormat", DATE_FORMAT))
+    set_value(ws, address, value)
+
+
 def set_formula(ws, address, formula):
     com(lambda: put(ws.Range(address), "Formula", formula))
 
@@ -123,7 +129,7 @@ def get_formula(ws, address):
 
 def update_existing(ws, row, trade_date, qty, price):
     term = f"{fmt_num(qty)}*{fmt_num(price)}"
-    set_value(ws, f"B{row}", trade_date)
+    set_date(ws, f"B{row}", trade_date)
     set_fill(ws, f"A{row}:BF{row}", "ColorIndex", XL_COLOR_INDEX_NONE)
     set_formula(ws, f"T{row}", append_term(get_formula(ws, f"T{row}"), term))
     set_formula(ws, f"V{row}", append_term(get_formula(ws, f"V{row}"), fmt_num(qty)))
@@ -135,7 +141,7 @@ def insert_new(ws, ticker, trade_date, qty, price):
     try:
         com(lambda: ws.Rows(TEMPLATE_ROW).Copy(ws.Rows(new_row)))
         for col in "BCD":
-            set_value(ws, f"{col}{new_row}", trade_date)
+            set_date(ws, f"{col}{new_row}", trade_date)
         set_formula(ws, f"V{new_row}", f"={fmt_num(qty)}")
         set_formula(ws, f"T{new_row}", f"={fmt_num(qty)}*{fmt_num(price)}")
         com(lambda: ws.Range(f"AM{new_row}").ClearContents())
