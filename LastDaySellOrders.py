@@ -1,4 +1,7 @@
+"""Find existing single-leg SELLs (including children) to replace, or create missing SELLs."""
+
 import os
+from collections import Counter
 import pandas as pd
 import schwabdev
 from schwab_tokens import TOKENS_DB
@@ -30,40 +33,61 @@ else:
 if not account_hash:
     raise SystemExit("Error: Could not retrieve a valid account hash.")
 
-# 4. Fetch all active/working orders from Schwab to find IDs automatically
-print("Fetching active working orders from Schwab...")
+# 4. Fetch the last 30 days, including queued orders, not just WORKING orders.
+print("Fetching orders entered in the last 30 days from the first linked account...")
 
-# Define time window: from 30 days ago until right now (UTC timezone standard)
 now_utc = datetime.now(timezone.utc)
 from_time = (now_utc - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 to_time = now_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
+# Keep the request within Schwab's order result limit; abort below if saturated.
+max_results = 3000
+orders_resp = client.account_orders(
+    accountHash=account_hash,
+    fromEnteredTime=from_time,
+    toEnteredTime=to_time,
+    maxResults=max_results,
+)
 
-
-try:
-    # Pass the required time windows explicitly alongside your status filter
-    orders_resp = client.account_orders(
-        accountHash=account_hash,
-        fromEnteredTime=from_time,
-        toEnteredTime=to_time,
-        status="WORKING"
+if orders_resp.status_code != 200:
+    raise SystemExit(
+        f"Error fetching orders. Status: {orders_resp.status_code}. "
+        f"Server response: {orders_resp.text}"
     )
 
-    open_orders = []
-    if orders_resp.status_code == 200:
-        open_orders = orders_resp.json()
-        print(f"Successfully retrieved {len(open_orders)} working orders from server.")
-    else:
-        print(f"⚠️ Warning: Could not fetch open orders from server. Status: {orders_resp.status_code}")
-        print(f"Server response message: {orders_resp.text}")
-        open_orders = []
-        
-        
-except Exception as e:
-    print(f"💥 Failed to query order endpoints: {e}")
-    open_orders = []
+orders = orders_resp.json()
+if not isinstance(orders, list) or any(not isinstance(order, dict) for order in orders):
+    raise SystemExit("Error: Expected a list of orders from Schwab; batch aborted.")
+if len(orders) >= max_results:
+    raise SystemExit(
+        "Error: Order query reached its result limit; results may be incomplete. "
+        "Batch aborted. Query smaller date windows before replacing orders."
+    )
 
+terminal_statuses = {"FILLED", "CANCELED", "REJECTED", "EXPIRED", "REPLACED"}
+pending_changes = {"PENDING_CANCEL", "PENDING_REPLACE"}
+all_orders = []
+pending_orders = list(orders)
+while pending_orders:
+    order = pending_orders.pop()
+    all_orders.append(order)
+    pending_orders.extend(order.get("childOrderStrategies", []))
 
+status_counts = Counter(order.get("status", "UNKNOWN") for order in all_orders)
+print(f"Retrieved {len(orders)} orders. Status counts: {dict(status_counts)}")
+# Replace individual leaf orders, never flatten a parent or multi-leg strategy.
+open_orders = [
+    order for order in all_orders
+    if order.get("status")
+    and order["status"] not in terminal_statuses | pending_changes | {"UNKNOWN"}
+    and order.get("orderStrategyType") == "SINGLE"
+    and len(order.get("orderLegCollection", [])) == 1
+    and not order.get("childOrderStrategies")
+    and order.get("orderId") is not None
+]
+print(f"Found {len(open_orders)} existing single-leg orders eligible for replacement attempts.")
+attempted_order_ids = set()
+attempted_sells = set()
 
 # 5. Load and iterate through your Excel file
 excel_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "LastDaySellOrders.xlsx")
@@ -73,7 +97,7 @@ try:
 except Exception as e:
     raise SystemExit(f"Error reading Excel file: {e}")
 
-# 6. Loop through rows, auto-locate matching active order, and replace
+# 6. Replace an eligible order, or place a SELL when no unresolved SELL exists.
 for index, row in df.iterrows():
     symbol = str(row['symbol']).strip().upper()
     instruction = str(row['instruction']).strip().upper()  # "BUY" or "SELL"
@@ -87,9 +111,16 @@ for index, row in df.iterrows():
 
     print(f"Processing row {index + 1}: Searching for open {instruction} order on {symbol}...")
 
+    if instruction == "SELL" and symbol in attempted_sells:
+        print(f"Skipped row {index + 1}: A SELL submission was already attempted for {symbol} in this batch.")
+        print("-" * 40)
+        continue
+
     # --- AUTO-LOOKUP LOGIC ---
-    matched_order_id = None
+    matched_order_ids = []
     for order in open_orders:
+        if instruction != "SELL" and order.get("status") not in {"WORKING", "QUEUED"}:
+            continue
         # Navigate Schwab's standard JSON order leg structure
         legs = order.get('orderLegCollection', [])
         if legs:
@@ -99,15 +130,48 @@ for index, row in df.iterrows():
             
             # Check if this active order matches our Excel symbol and buy/sell intent
             if leg_symbol == symbol and leg_instruction == instruction:
-                matched_order_id = str(order.get('orderId'))
-                break # Found it!
+                order_id = str(order['orderId'])
+                if order_id not in attempted_order_ids:
+                    matched_order_ids.append(order_id)
+    matched_order_ids = list(dict.fromkeys(matched_order_ids))
 
-    if not matched_order_id:
-        print(f"❌ Skipped row {index + 1}: No active working {instruction} order found for {symbol} to replace.")
+    if not matched_order_ids:
+        if instruction != "SELL":
+            print(f"Skipped row {index + 1}: No eligible {instruction} order found for {symbol}; only missing SELL orders are created.")
+            print("-" * 40)
+            continue
+
+        unresolved_sells = []
+        for order in all_orders:
+            if order.get("status") in terminal_statuses:
+                continue
+            for leg in order.get("orderLegCollection", []):
+                if (
+                    leg.get("instrument", {}).get("symbol", "").upper() == symbol
+                    and leg.get("instruction", "").upper() == "SELL"
+                ):
+                    unresolved_sells.append(
+                        f"ID={order.get('orderId', 'missing')}, "
+                        f"status={order.get('status', 'UNKNOWN')}, "
+                        f"strategy={order.get('orderStrategyType', 'missing')}"
+                    )
+                    break
+
+        if unresolved_sells:
+            print(f"Skipped row {index + 1}: Cannot safely replace existing SELL for {symbol}: {'; '.join(unresolved_sells)}. Pending changes, missing IDs/status, and parent/multi-leg strategies require review. No new SELL placed.")
+            print("-" * 40)
+            continue
+
+    if len(matched_order_ids) > 1:
+        print(f"Skipped row {index + 1}: Multiple eligible {instruction} orders found for {symbol}: {', '.join(matched_order_ids)}. Select an order explicitly rather than replacing an arbitrary match.")
         print("-" * 40)
         continue
 
-    print(f"🔍 Found matching Order ID {matched_order_id} on Schwab server. Formatting replacement...")
+    matched_order_id = matched_order_ids[0] if matched_order_ids else None
+    if matched_order_id:
+        print(f"Found matching Order ID {matched_order_id}. Formatting replacement...")
+    else:
+        print(f"No active SELL found for {symbol}. Formatting a new SELL from the Excel row...")
 
     # Safety Check for Market Orders in Extended Hours
     if session_type in ["SEAMLESS", "SEPARATE"] and order_type == "MARKET":
@@ -136,21 +200,29 @@ for index, row in df.iterrows():
     if order_type == "LIMIT":
         order_payload["price"] = f"{float(row['price']):.2f}"
 
-    # Route the dynamic Replace Request
+    # Mark attempts before sending: a timeout does not prove submission failed.
+    if instruction == "SELL":
+        attempted_sells.add(symbol)
+    if matched_order_id:
+        attempted_order_ids.add(matched_order_id)
+    action = f"replace order {matched_order_id}" if matched_order_id else f"place new SELL for {symbol}"
     try:
-        resp = client.replace_order(account_hash, matched_order_id, order_payload)
+        if matched_order_id:
+            resp = client.replace_order(account_hash, matched_order_id, order_payload)
+        else:
+            resp = client.place_order(account_hash, order_payload)
         
         if resp.status_code == 201:
             location_header = resp.headers.get('location', '')
             new_order_id = location_header.split('/')[-1] if location_header else "Unknown ID"
-            print(f"✅ Success! Order {matched_order_id} replaced. New Order ID: {new_order_id}")
+            print(f"Success: {action}. New Order ID: {new_order_id}")
         else:
-            print(f"❌ Failed to replace order {matched_order_id}. Status Code: {resp.status_code}")
+            print(f"Failed to {action}. Status Code: {resp.status_code}")
             print(f"Response: {resp.text}")
             
     except Exception as e:
-        print(f"💥 Critical error executing lookup-replacement: {e}")
+        print(f"Error attempting to {action}: {e}. Submission outcome may be unknown; verify with Schwab before retrying.")
         
     print("-" * 40)
 
-print("Batch dynamic modifications complete.")
+print("Batch SELL placement/replacement processing complete.")
